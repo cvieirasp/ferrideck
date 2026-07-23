@@ -1,0 +1,9 @@
+[package]
+name = "ferrideck"
+version = "0.1.0"
+edition = "2024"
+description = "Spaced repetition flashcards for language learning, built in Rust"
+license = "MIT"
+repository = "https://github.com/cvieirasp/ferrideck"
+
+[dependencies]
