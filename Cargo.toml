@@ -8,3 +8,4 @@ repository = "https://github.com/cvieirasp/ferrideck"
 
 [dependencies]
 eframe = "0.35.0"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
