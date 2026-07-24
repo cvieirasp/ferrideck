@@ -11,6 +11,8 @@ mod review;
 
 use card_editor::CardDraft;
 use eframe::egui;
+use rusqlite::Connection;
+use uuid::Uuid;
 
 /// The screen currently shown in the main area.
 ///
@@ -45,52 +47,59 @@ impl Screen {
     }
 }
 
-/// Root of the application UI and the single owner of all UI state.
+/// View state of the application.
 ///
-/// In immediate mode there is no persistent widget tree: every frame is
-/// redrawn from this struct, so anything the screen shows must be reachable
-/// from here.
+/// Everything here is meaningful only while the window is open and is lost on
+/// exit, by design. The durable data lives in the database and is read through
+/// `db/`; this struct only remembers what the user is doing right now.
 ///
-/// What belongs in this struct is **view state**: which screen is open, what
-/// the user typed but has not saved, which row is selected, whether a dialog is
-/// open. That state is meaningful only while the window is open and is lost on
-/// exit, by design.
-///
-/// What does **not** belong here is the durable data itself. Decks, cards and
-/// review history become owned by `db/` in milestone M3, and `models/` defines
-/// their types. From then on this struct holds only a cached copy loaded for
-/// display, never the source of truth.
-pub(crate) struct FerrideckApp {
+/// Kept apart from the connection so screens can borrow the two independently:
+/// see the note on [`FerrideckApp::ui`].
+#[derive(Default)]
+struct AppState {
     /// Screen currently visible in the central area.
-    ///
-    /// View state: it belongs to this struct permanently and is never
-    /// persisted.
     current_screen: Screen,
+
+    /// Deck the user is working on, shared by every screen.
+    ///
+    /// `None` means nothing is selected yet, which the card editor and the
+    /// review screen treat as "nothing to do here yet" rather than an error.
+    selected_deck: Option<Uuid>,
+
+    /// Name being typed in the deck list, before the deck is created.
+    new_deck_name: String,
 
     /// Card being written in the editor, kept here so switching screens does
     /// not discard what the user typed.
     card_draft: CardDraft,
 
-    /// Deck names shown while the UI is built.
+    /// Last message for the user: a confirmation or a database failure.
     ///
-    /// Development-only fake data. In M3 this is replaced by a cached
-    /// `Vec<Deck>` loaded through `db/`, refreshed when the data changes rather
-    /// than rebuilt every frame.
-    decks: Vec<String>,
+    /// `None` means there is nothing to report.
+    status: Option<String>,
 }
 
-impl Default for FerrideckApp {
-    /// Starts on the default screen with fake decks, so the UI has something to
-    /// show before `db/` exists.
-    fn default() -> Self {
+/// Root of the application UI and the single owner of all UI state.
+///
+/// In immediate mode there is no persistent widget tree: every frame is
+/// redrawn from this struct, so anything the screen shows must be reachable
+/// from here.
+pub(crate) struct FerrideckApp {
+    /// The open database, owned for the whole life of the window.
+    ///
+    /// Screens receive it as `&Connection` for the duration of a frame; nothing
+    /// else in the application holds on to it.
+    connection: Connection,
+
+    state: AppState,
+}
+
+impl FerrideckApp {
+    /// Takes ownership of the database connection opened at startup.
+    pub(crate) fn new(connection: Connection) -> Self {
         Self {
-            current_screen: Screen::default(),
-            card_draft: CardDraft::default(),
-            decks: vec![
-                "English - Vocabulary".to_owned(),
-                "English - Phrasal verbs".to_owned(),
-                "English - Idioms".to_owned(),
-            ],
+            connection,
+            state: AppState::default(),
         }
     }
 }
@@ -99,30 +108,59 @@ impl eframe::App for FerrideckApp {
     /// Draws one frame. Called by eframe on every repaint, so the work done
     /// here must stay cheap.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Destructured once so the connection and the individual pieces of view
+        // state are borrowed separately. Passing `&mut self` to a screen while
+        // also handing it `&self.connection` would be a second borrow of the
+        // same value and would not compile.
+        let Self { connection, state } = self;
+
         egui::Panel::top("nav_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 for screen in Screen::ALL {
-                    let is_active = self.current_screen == screen;
+                    let is_active = state.current_screen == screen;
                     if ui.selectable_label(is_active, screen.title()).clicked() {
-                        self.current_screen = screen;
+                        state.current_screen = screen;
                     }
                 }
             });
         });
 
         egui::Panel::bottom("status_bar").show(ui, |ui| {
-            ui.small(format!("{} decks (development data)", self.decks.len()));
+            ui.small(state.status.as_deref().unwrap_or("Ready"));
         });
 
         egui::CentralPanel::default().show(ui, |ui| {
             // Each screen receives only the state it needs, never the whole
             // application state. The match stays exhaustive, so a new variant
             // cannot be forgotten here.
-            match self.current_screen {
-                Screen::Review => review::show(ui),
-                Screen::CardEditor => card_editor::show(ui, &mut self.card_draft),
-                Screen::DeckList => deck_list::show(ui, &self.decks),
+            match state.current_screen {
+                Screen::Review => {
+                    review::show(ui, connection, state.selected_deck, &mut state.status)
+                }
+                Screen::CardEditor => card_editor::show(
+                    ui,
+                    connection,
+                    state.selected_deck,
+                    &mut state.card_draft,
+                    &mut state.status,
+                ),
+                Screen::DeckList => deck_list::show(
+                    ui,
+                    connection,
+                    &mut state.selected_deck,
+                    &mut state.new_deck_name,
+                    &mut state.status,
+                ),
             }
         });
     }
+}
+
+/// Puts a failed database call on the status line.
+///
+/// `{:#}` renders the whole `anyhow` chain on one line, so the user sees the
+/// action that failed and the underlying cause instead of just the outermost
+/// message.
+fn report_error(status: &mut Option<String>, error: &anyhow::Error) {
+    *status = Some(format!("{error:#}"));
 }
