@@ -2,6 +2,7 @@
 //! went. Owns the session queue while it lasts; the scheduling decisions come
 //! from `study/` and the writes go through `db/`.
 
+use super::markdown::{CommonMarkCache, render_markdown};
 use crate::db;
 use crate::models::{Card, Scheduling};
 use crate::study::{self, Rating};
@@ -144,6 +145,7 @@ pub(super) fn show(
     connection: &Connection,
     selected_deck: Option<Uuid>,
     session: &mut SessionState,
+    markdown_cache: &mut CommonMarkCache,
     status: &mut Option<String>,
 ) {
     // Moving the state out avoids borrowing `session` twice: the current state
@@ -151,7 +153,9 @@ pub(super) fn show(
     // what `Option::take` does, generalized to any enum.
     match std::mem::take(session) {
         SessionState::Idle => {
-            if let Some(active) = start_screen(ui, connection, selected_deck, status) {
+            if let Some(active) =
+                start_screen(ui, connection, selected_deck, markdown_cache, status)
+            {
                 // A new session starts with a clean status line: whatever was
                 // reported before belongs to the previous activity.
                 *status = None;
@@ -182,9 +186,10 @@ fn start_screen(
     ui: &mut egui::Ui,
     connection: &Connection,
     selected_deck: Option<Uuid>,
+    markdown_cache: &mut CommonMarkCache,
     status: &mut Option<String>,
 ) -> Option<ReviewSession> {
-    ui.vertical_centered(|ui| {
+    let started = ui.vertical_centered(|ui| {
         ui.add_space(32.0);
 
         let Some(deck_id) = selected_deck else {
@@ -231,9 +236,34 @@ fn start_screen(
             .clicked();
 
         started.then(|| ReviewSession::new(due))
-    })
-    .inner
+    });
+
+    // TODO(#41): temporary. Proves the Markdown pipeline draws styled text
+    // before there is any card content going through it. Issue #41 renders the
+    // real card fronts and backs and this block goes away with it.
+    //
+    // Drawn outside the block above so it shows in every idle state, including
+    // the ones that return early because no deck is selected or nothing is due.
+    ui.add_space(24.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.small("Markdown preview (temporary, see #41)");
+    ui.add_space(8.0);
+    render_markdown(ui, markdown_cache, MARKDOWN_SAMPLE);
+
+    started.inner
 }
+
+/// Sample text for the temporary preview above. Exercises the three things M5
+/// needs: bold, italic and a list.
+// TODO(#41): remove together with the preview block in `start_screen`.
+const MARKDOWN_SAMPLE: &str = "\
+A card front can be **bold**, *italic*, or ***both***, and can carry a list:
+
+- *to run* - **correu** in the past
+- *to eat* - **comeu** in the past
+- `code spans` survive too
+";
 
 /// Draws the current card and applies the rating the user gives it.
 fn run_session(

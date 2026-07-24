@@ -7,10 +7,12 @@
 
 mod card_editor;
 mod deck_list;
+mod markdown;
 mod review;
 
 use card_editor::CardDraft;
 use eframe::egui;
+use markdown::CommonMarkCache;
 use review::SessionState;
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -99,6 +101,25 @@ pub(crate) struct FerrideckApp {
     /// else in the application holds on to it.
     connection: Connection,
 
+    /// What the Markdown renderer remembers from one frame to the next.
+    ///
+    /// Immediate mode throws away every widget at the end of a frame, so a
+    /// renderer that needs continuity has nowhere to keep it: a cache created
+    /// inside a draw call would be born empty and dropped microseconds later.
+    /// It therefore lives here, like every other piece of cross-frame state.
+    ///
+    /// What it actually holds: a flag saying the image and file loaders have
+    /// already been installed into the egui context, so that one-time setup does
+    /// not run 60 times a second; the click state of rendered links, which is
+    /// written when a link is clicked and read on a later frame; the heading a
+    /// fragment link asked to scroll to; and layout caches for scrollable
+    /// documents. It is not a cache of parsed Markdown - the source is parsed
+    /// again on every frame, which is what makes live preview work.
+    ///
+    /// Shared by every screen on purpose: one cache serves any number of
+    /// documents, keyed internally, so there is no reason to keep several.
+    markdown_cache: CommonMarkCache,
+
     state: AppState,
 }
 
@@ -107,6 +128,7 @@ impl FerrideckApp {
     pub(crate) fn new(connection: Connection) -> Self {
         Self {
             connection,
+            markdown_cache: CommonMarkCache::default(),
             state: AppState::default(),
         }
     }
@@ -120,7 +142,11 @@ impl eframe::App for FerrideckApp {
         // state are borrowed separately. Passing `&mut self` to a screen while
         // also handing it `&self.connection` would be a second borrow of the
         // same value and would not compile.
-        let Self { connection, state } = self;
+        let Self {
+            connection,
+            markdown_cache,
+            state,
+        } = self;
 
         egui::Panel::top("nav_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -147,6 +173,7 @@ impl eframe::App for FerrideckApp {
                     connection,
                     state.selected_deck,
                     &mut state.session,
+                    markdown_cache,
                     &mut state.status,
                 ),
                 Screen::CardEditor => card_editor::show(
