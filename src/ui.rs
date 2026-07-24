@@ -11,7 +11,7 @@ mod review;
 
 use card_editor::CardDraft;
 use eframe::egui;
-use review::ReviewSession;
+use review::SessionState;
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -74,12 +74,12 @@ struct AppState {
     /// not discard what the user typed.
     card_draft: CardDraft,
 
-    /// Study session in progress, if any.
+    /// Where the review screen is: idle, reviewing, or showing a summary.
     ///
-    /// `None` is the absence of a session, so there is no way to represent
-    /// "reviewing, but with no queue". Survives switching screens: leaving the
-    /// review tab and coming back resumes where the user was.
-    session: Option<ReviewSession>,
+    /// Each state carries only its own data, so "reviewing with no queue" or
+    /// "idle with a summary" cannot be represented. Survives switching screens:
+    /// leaving the review tab and coming back resumes where the user was.
+    session: SessionState,
 
     /// Last message for the user: a confirmation or a database failure.
     ///
