@@ -11,5 +11,6 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
 directories = "6.0.0"
 eframe = "0.35.0"
+egui_commonmark = { version = "0.24.0", default-features = false, features = ["pulldown_cmark"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 uuid = { version = "1.24.0", features = ["v4"] }
