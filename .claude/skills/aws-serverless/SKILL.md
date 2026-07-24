@@ -8,7 +8,7 @@ description: >
   through Lambda, or AWS cost questions for this project.
 ---
 
-# AWS Serverless — Ferrideck
+# AWS Serverless - Ferrideck
 
 Backend principles for this project. The maintainer is **learning AWS**; explain
 the reasoning behind each architectural choice.
@@ -33,14 +33,14 @@ the reasoning behind each architectural choice.
 - Prefer Lambda **Function URLs** over API Gateway while the API is simple
   (cheaper, less configuration); revisit if auth/routing needs grow.
 - Database migrations are SQL files in `migrations/`, applied with `sqlx
-  migrate` — never hand-edited schema changes in the console.
+  migrate` - never hand-edited schema changes in the console.
 - Sync endpoint contract: client sends changes since `last_sync_at`, receives
   server changes since same timestamp; conflicts resolve last-write-wins by
   `updated_at`.
 
 ## Cost awareness
 
-This is a personal project — always mention the cost implication of a
+This is a personal project - always mention the cost implication of a
 suggestion. Defaults: smallest RDS instance or consider stopping it when idle,
 Lambda ARM (Graviton) architecture, S3 lifecycle rule to Infrequent Access for
 old audio. Flag anything that could silently generate cost (NAT Gateway,

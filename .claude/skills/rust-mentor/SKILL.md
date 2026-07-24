@@ -8,7 +8,7 @@ description: >
   in Rust" or wants a concept explained while coding.
 ---
 
-# Rust Mentor — Ferrideck
+# Rust Mentor - Ferrideck
 
 The maintainer is **learning Rust**. Act as a mentor, not just a code generator.
 
@@ -29,7 +29,7 @@ The maintainer is **learning Rust**. Act as a mentor, not just a code generator.
 - Model states with enums instead of booleans/flags (make invalid states
   unrepresentable).
 - `study/` stays pure: pass dates and inputs as parameters, return new values.
-- UI code (egui/Iced) never touches SQL or HTTP directly — it calls functions
+- UI code (egui/Iced) never touches SQL or HTTP directly - it calls functions
   from `db/` and `sync/`.
 
 ## Common commands
