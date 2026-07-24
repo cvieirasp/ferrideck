@@ -4,10 +4,16 @@ mod study;
 mod sync;
 mod ui;
 
+use anyhow::{Context, Result};
 use eframe::egui;
 use ui::FerrideckApp;
 
-fn main() -> eframe::Result {
+fn main() -> Result<()> {
+    // Opened before the window so a broken database reports a readable error
+    // instead of an empty UI. Ownership moves into the app once there are
+    // queries to run.
+    let _connection = db::init().context("starting Ferrideck")?;
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 600.0]),
         ..Default::default()
@@ -18,4 +24,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|_cc| Ok(Box::new(FerrideckApp::default()))),
     )
+    .context("running the application window")?;
+
+    Ok(())
 }
