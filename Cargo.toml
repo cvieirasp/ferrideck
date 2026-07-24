@@ -7,3 +7,4 @@ license = "MIT"
 repository = "https://github.com/cvieirasp/ferrideck"
 
 [dependencies]
+eframe = "0.35.0"
