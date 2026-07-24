@@ -2,11 +2,14 @@
 //! Translates rows into `models` types so no SQL leaks into the rest of the
 //! application.
 
+use crate::models::Deck;
 use anyhow::{Context, Result};
+use chrono::{DateTime, SecondsFormat, Utc};
 use directories::ProjectDirs;
-use rusqlite::Connection;
+use rusqlite::{Connection, Row, params};
 use std::fs;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 /// Reverse-domain parts used to locate the per-user data directory.
 const APP_QUALIFIER: &str = "com";
@@ -110,9 +113,153 @@ fn create_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Inserts a new deck and returns it.
+///
+/// The identity and the timestamps are decided by [`Deck::new`], so the value
+/// returned here is exactly what was written: no second read is needed.
+pub fn create_deck(connection: &Connection, name: &str, now: DateTime<Utc>) -> Result<Deck> {
+    let deck = Deck::new(name.to_owned(), now);
+
+    connection
+        .execute(
+            "INSERT INTO decks (id, name, created_at, updated_at, deleted)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                deck.id.to_string(),
+                deck.name,
+                format_timestamp(deck.created_at),
+                format_timestamp(deck.updated_at),
+                deck.deleted,
+            ],
+        )
+        .with_context(|| format!("inserting deck {}", deck.id))?;
+
+    Ok(deck)
+}
+
+/// Lists the decks that have not been deleted, ordered by name.
+///
+/// `COLLATE NOCASE` keeps the list in the order a reader expects: SQLite's
+/// default collation compares bytes, which would sort every capitalized name
+/// before every lowercase one.
+pub fn list_decks(connection: &Connection) -> Result<Vec<Deck>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, name, created_at, updated_at, deleted
+             FROM decks
+             WHERE deleted = 0
+             ORDER BY name COLLATE NOCASE",
+        )
+        .context("preparing the deck list query")?;
+
+    let decks = statement
+        .query_map([], row_to_deck)
+        .context("running the deck list query")?
+        .collect::<rusqlite::Result<Vec<Deck>>>()
+        .context("reading decks")?;
+
+    Ok(decks)
+}
+
+/// Renames a deck and refreshes its `updated_at`.
+///
+/// A missing id is not an error: see [`delete_deck`] for the reasoning.
+pub fn rename_deck(
+    connection: &Connection,
+    id: Uuid,
+    new_name: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    connection
+        .execute(
+            "UPDATE decks SET name = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id.to_string(), new_name, format_timestamp(now)],
+        )
+        .with_context(|| format!("renaming deck {id}"))?;
+
+    Ok(())
+}
+
+/// Soft-deletes a deck: the row stays, flagged and with a fresh `updated_at`.
+///
+/// Deleting an id that does not exist succeeds and changes nothing. Deletion is
+/// idempotent by nature, and sync makes that concrete: the same delete can
+/// arrive twice, or after the row was already removed locally, and neither case
+/// is a failure the user should see. `execute` still reports how many rows
+/// changed, so a caller that needs to distinguish the two can be served later
+/// without touching this SQL.
+pub fn delete_deck(connection: &Connection, id: Uuid, now: DateTime<Utc>) -> Result<()> {
+    connection
+        .execute(
+            "UPDATE decks SET deleted = 1, updated_at = ?2 WHERE id = ?1",
+            params![id.to_string(), format_timestamp(now)],
+        )
+        .with_context(|| format!("deleting deck {id}"))?;
+
+    Ok(())
+}
+
+/// Builds a [`Deck`] from a row of the `decks` table.
+///
+/// Every `SELECT` on decks goes through this function, so the column order and
+/// the text formats are defined in exactly one place.
+fn row_to_deck(row: &Row<'_>) -> rusqlite::Result<Deck> {
+    let id: String = row.get("id")?;
+    let created_at: String = row.get("created_at")?;
+    let updated_at: String = row.get("updated_at")?;
+
+    Ok(Deck {
+        id: parse_uuid(&id)?,
+        name: row.get("name")?,
+        created_at: parse_timestamp(&created_at)?,
+        updated_at: parse_timestamp(&updated_at)?,
+        deleted: row.get("deleted")?,
+    })
+}
+
+/// Formats a timestamp the way every timestamp column stores it.
+///
+/// Always UTC, always the same width, always ending in `Z`, so that comparing
+/// and ordering the text gives the same answer as comparing the instants.
+fn format_timestamp(value: DateTime<Utc>) -> String {
+    value.to_rfc3339_opts(SecondsFormat::Micros, true)
+}
+
+/// Parses a timestamp written by [`format_timestamp`].
+fn parse_timestamp(value: &str) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|parsed| parsed.with_timezone(&Utc))
+        .map_err(conversion_failure)
+}
+
+/// Parses a UUID stored as text.
+fn parse_uuid(value: &str) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(value).map_err(conversion_failure)
+}
+
+/// Wraps a parse failure as a rusqlite error, so row mapping can use `?`.
+///
+/// Reports the stored text as unreadable rather than pretending the row is
+/// fine: a malformed date or UUID means the database was corrupted or written
+/// by something else.
+fn conversion_failure<E>(error: E) -> rusqlite::Error
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone as _;
+
+    /// A fixed instant, so tests never read the clock.
+    fn at(day: u32, hour: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, day, hour, 0, 0)
+            .single()
+            .expect("valid timestamp")
+    }
 
     /// Opens an isolated in-memory database with the production schema.
     fn test_connection() -> Connection {
@@ -193,5 +340,82 @@ mod tests {
             orphan.is_err(),
             "a card pointing at a missing deck must be rejected"
         );
+    }
+
+    #[test]
+    fn create_then_list_returns_the_same_deck() {
+        let connection = test_connection();
+        let now = at(24, 10);
+
+        let created = create_deck(&connection, "English - Idioms", now).expect("creating a deck");
+        let listed = list_decks(&connection).expect("listing decks");
+
+        assert_eq!(listed, vec![created.clone()]);
+        assert_eq!(created.name, "English - Idioms");
+        assert_eq!(created.created_at, now);
+        assert_eq!(created.updated_at, now);
+        assert!(!created.deleted);
+    }
+
+    #[test]
+    fn list_orders_by_name_ignoring_case() {
+        let connection = test_connection();
+        let now = at(24, 10);
+
+        create_deck(&connection, "Banana", now).expect("creating Banana");
+        create_deck(&connection, "apple", now).expect("creating apple");
+
+        let names: Vec<String> = list_decks(&connection)
+            .expect("listing decks")
+            .into_iter()
+            .map(|deck| deck.name)
+            .collect();
+
+        // A byte-wise ORDER BY would put "Banana" first, because 'B' < 'a'.
+        assert_eq!(names, vec!["apple".to_owned(), "Banana".to_owned()]);
+    }
+
+    #[test]
+    fn list_excludes_deleted_decks() {
+        let connection = test_connection();
+
+        let kept = create_deck(&connection, "Kept", at(24, 10)).expect("creating the kept deck");
+        let removed =
+            create_deck(&connection, "Removed", at(24, 10)).expect("creating the removed deck");
+
+        delete_deck(&connection, removed.id, at(25, 9)).expect("deleting a deck");
+
+        let listed = list_decks(&connection).expect("listing decks");
+
+        assert_eq!(listed, vec![kept]);
+    }
+
+    #[test]
+    fn rename_changes_the_name_and_the_timestamp() {
+        let connection = test_connection();
+        let created_at = at(24, 10);
+        let renamed_at = at(25, 15);
+
+        let deck = create_deck(&connection, "Old name", created_at).expect("creating a deck");
+        rename_deck(&connection, deck.id, "New name", renamed_at).expect("renaming a deck");
+
+        let listed = list_decks(&connection).expect("listing decks");
+        let stored = listed.first().expect("one deck");
+
+        assert_eq!(stored.name, "New name");
+        assert_eq!(stored.updated_at, renamed_at);
+        assert_ne!(stored.updated_at, deck.updated_at);
+        // Creation time is history and must survive an edit.
+        assert_eq!(stored.created_at, created_at);
+    }
+
+    #[test]
+    fn deleting_a_missing_deck_succeeds_and_changes_nothing() {
+        let connection = test_connection();
+        let kept = create_deck(&connection, "Kept", at(24, 10)).expect("creating a deck");
+
+        delete_deck(&connection, Uuid::new_v4(), at(25, 9)).expect("deleting a missing deck");
+
+        assert_eq!(list_decks(&connection).expect("listing decks"), vec![kept]);
     }
 }
