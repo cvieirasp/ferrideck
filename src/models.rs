@@ -15,6 +15,25 @@ const DEFAULT_EASE_FACTOR: f32 = 2.5;
 /// Interval a new card starts with: it is due the day it is created.
 const INITIAL_INTERVAL_DAYS: u32 = 0;
 
+/// The scheduling state a review produces.
+///
+/// Lives here, and not in `study/`, so that `study` can produce it and `db` can
+/// store it while both depend only on this module: the dependency direction
+/// stays `ui -> study/sync/db -> models`, with no sibling knowing the others.
+///
+/// This is data, not rules. The rules that fill it in are in `study/`, and the
+/// invariants they guarantee (the ease floor, the interval minimums) are
+/// documented there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Scheduling {
+    /// Days until the card is due again. `0` means "still today".
+    pub interval_days: u32,
+    /// The card's new ease factor, never below the floor SM-2 imposes.
+    pub ease_factor: f32,
+    /// Calendar day the card becomes due, `today + interval_days`.
+    pub due_date: NaiveDate,
+}
+
 /// A named collection of cards.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Deck {

@@ -21,7 +21,7 @@
 //! is implied by `interval_days == 0`. The shape of the curve is the same; the
 //! constants are tuned for readability over fidelity.
 
-use crate::models::Card;
+use crate::models::{Card, Scheduling};
 use chrono::{Days, NaiveDate};
 
 /// Lowest ease factor a card may reach.
@@ -59,20 +59,6 @@ pub enum Rating {
     Good,
     /// Recalled immediately, with no hesitation.
     Easy,
-}
-
-/// The scheduling state a review produces.
-///
-/// Returned instead of mutating the card, so this module never owns or writes
-/// data: the caller decides what to persist.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Scheduling {
-    /// Days until the card is due again. `0` means "still today".
-    pub interval_days: u32,
-    /// The card's new ease factor, never below [`EASE_FLOOR`].
-    pub ease_factor: f32,
-    /// Calendar day the card becomes due, `today + interval_days`.
-    pub due_date: NaiveDate,
 }
 
 /// Computes the next scheduling for `card` given how the user rated it.

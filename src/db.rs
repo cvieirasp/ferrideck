@@ -2,7 +2,7 @@
 //! Translates rows into `models` types so no SQL leaks into the rest of the
 //! application.
 
-use crate::models::{Card, Deck};
+use crate::models::{Card, Deck, Scheduling};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use directories::ProjectDirs;
@@ -303,6 +303,10 @@ pub fn due_cards(connection: &Connection, deck_id: Uuid, today: NaiveDate) -> Re
 /// belong to the SM-2 algorithm in `study/`, and fixing a typo on the back of a
 /// card must not reset how well it is known.
 ///
+/// **Write contract:** this is the only function that writes card content.
+/// Scheduling is written only by [`apply_review`]. Neither should ever grow the
+/// other one's columns.
+///
 /// A missing id is not an error, as in [`delete_deck`].
 pub fn update_card(
     connection: &Connection,
@@ -332,6 +336,44 @@ pub fn delete_card(connection: &Connection, id: Uuid, now: DateTime<Utc>) -> Res
             params![id.to_string(), format_timestamp(now)],
         )
         .with_context(|| format!("deleting card {id}"))?;
+
+    Ok(())
+}
+
+/// Stores the outcome of a review: the new scheduling of a card.
+///
+/// The `Scheduling` comes from [`crate::study::schedule`], which computed it
+/// from the card and the user's rating. This function only writes it down: it
+/// makes no scheduling decision of its own.
+///
+/// **Write contract:** this is the only function that writes `interval_days`,
+/// `ease_factor` and `due_date`. Card content is written only by
+/// [`update_card`]. Keeping the two apart is what guarantees that reviewing a
+/// card cannot alter its text and that editing its text cannot erase how well
+/// it is known.
+///
+/// A missing id is not an error, as in [`delete_deck`]: a review of a card that
+/// was deleted on another device is a no-op, not a failure.
+pub fn apply_review(
+    connection: &Connection,
+    card_id: Uuid,
+    scheduling: &Scheduling,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    connection
+        .execute(
+            "UPDATE cards
+             SET interval_days = ?2, ease_factor = ?3, due_date = ?4, updated_at = ?5
+             WHERE id = ?1",
+            params![
+                card_id.to_string(),
+                scheduling.interval_days,
+                scheduling.ease_factor,
+                format_date(scheduling.due_date),
+                format_timestamp(now),
+            ],
+        )
+        .with_context(|| format!("applying a review to card {card_id}"))?;
 
     Ok(())
 }
@@ -756,5 +798,123 @@ mod tests {
             examples,
             vec![Some("She gathered the papers.".to_owned()), None]
         );
+    }
+
+    /// Scheduling values are floats: comparing them with `==` would be fragile,
+    /// so ease assertions allow a slack far smaller than any real change.
+    fn assert_ease(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1e-4,
+            "expected ease {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn apply_review_writes_scheduling_and_leaves_content_alone() {
+        let (connection, deck_id) = connection_with_deck();
+
+        let card = create_card(
+            &connection,
+            deck_id,
+            "to gather",
+            "reunir",
+            Some("She gathered the papers."),
+            at(24, 10),
+            on(24),
+        )
+        .expect("creating a card");
+
+        let scheduling = Scheduling {
+            interval_days: 6,
+            ease_factor: 2.6,
+            due_date: on(30),
+        };
+
+        apply_review(&connection, card.id, &scheduling, at(24, 18)).expect("applying a review");
+
+        let stored = list_cards(&connection, deck_id).expect("listing cards");
+        let stored = stored.first().expect("one card");
+
+        assert_eq!(stored.interval_days, 6);
+        assert_ease(stored.ease_factor, 2.6);
+        assert_eq!(stored.due_date, on(30));
+        assert_eq!(stored.updated_at, at(24, 18));
+
+        // Content is off limits to this function.
+        assert_eq!(stored.front, card.front);
+        assert_eq!(stored.back, card.back);
+        assert_eq!(stored.example, card.example);
+        assert_eq!(stored.created_at, card.created_at);
+        assert!(!stored.deleted);
+    }
+
+    #[test]
+    fn applying_a_review_to_a_missing_card_succeeds_and_changes_nothing() {
+        let (connection, deck_id) = connection_with_deck();
+
+        let card = create_card(
+            &connection,
+            deck_id,
+            "front",
+            "back",
+            None,
+            at(24, 10),
+            on(24),
+        )
+        .expect("creating a card");
+
+        let scheduling = Scheduling {
+            interval_days: 6,
+            ease_factor: 2.6,
+            due_date: on(30),
+        };
+
+        apply_review(&connection, Uuid::new_v4(), &scheduling, at(24, 18))
+            .expect("reviewing a missing card");
+
+        assert_eq!(
+            list_cards(&connection, deck_id).expect("listing cards"),
+            vec![card]
+        );
+    }
+
+    #[test]
+    fn a_second_review_overwrites_the_first() {
+        let (connection, deck_id) = connection_with_deck();
+
+        let card = create_card(
+            &connection,
+            deck_id,
+            "front",
+            "back",
+            None,
+            at(24, 10),
+            on(24),
+        )
+        .expect("creating a card");
+
+        let first = Scheduling {
+            interval_days: 6,
+            ease_factor: 2.6,
+            due_date: on(30),
+        };
+        apply_review(&connection, card.id, &first, at(24, 18)).expect("first review");
+
+        // A failed answer the next day: the interval collapses and the card is
+        // due again immediately.
+        let second = Scheduling {
+            interval_days: 0,
+            ease_factor: 2.4,
+            due_date: on(25),
+        };
+        apply_review(&connection, card.id, &second, at(25, 9)).expect("second review");
+
+        let stored = list_cards(&connection, deck_id).expect("listing cards");
+        let stored = stored.first().expect("one card");
+
+        assert_eq!(stored.interval_days, 0);
+        assert_ease(stored.ease_factor, 2.4);
+        assert_eq!(stored.due_date, on(25));
+        assert_eq!(stored.updated_at, at(25, 9));
     }
 }
