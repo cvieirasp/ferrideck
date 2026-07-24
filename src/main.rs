@@ -16,6 +16,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Ferrideck",
         options,
-        Box::new(|cc| Ok(Box::new(FerrideckApp::new(cc)))),
+        Box::new(|_cc| Ok(Box::new(FerrideckApp::default()))),
     )
 }
