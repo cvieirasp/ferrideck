@@ -153,9 +153,7 @@ pub(super) fn show(
     // what `Option::take` does, generalized to any enum.
     match std::mem::take(session) {
         SessionState::Idle => {
-            if let Some(active) =
-                start_screen(ui, connection, selected_deck, markdown_cache, status)
-            {
+            if let Some(active) = start_screen(ui, connection, selected_deck, status) {
                 // A new session starts with a clean status line: whatever was
                 // reported before belongs to the previous activity.
                 *status = None;
@@ -164,7 +162,7 @@ pub(super) fn show(
         }
 
         SessionState::Active(mut active) => {
-            run_session(ui, connection, &mut active, status);
+            run_session(ui, connection, &mut active, markdown_cache, status);
 
             *session = if active.is_finished() {
                 SessionState::Done(active.summary())
@@ -186,10 +184,9 @@ fn start_screen(
     ui: &mut egui::Ui,
     connection: &Connection,
     selected_deck: Option<Uuid>,
-    markdown_cache: &mut CommonMarkCache,
     status: &mut Option<String>,
 ) -> Option<ReviewSession> {
-    let started = ui.vertical_centered(|ui| {
+    ui.vertical_centered(|ui| {
         ui.add_space(32.0);
 
         let Some(deck_id) = selected_deck else {
@@ -236,98 +233,75 @@ fn start_screen(
             .clicked();
 
         started.then(|| ReviewSession::new(due))
-    });
-
-    // TODO(#41): temporary. Proves the Markdown pipeline draws styled text
-    // before there is any card content going through it. Issue #41 renders the
-    // real card fronts and backs and this block goes away with it.
-    //
-    // Drawn outside the block above so it shows in every idle state, including
-    // the ones that return early because no deck is selected or nothing is due.
-    ui.add_space(24.0);
-    ui.separator();
-    ui.add_space(8.0);
-    ui.small("Markdown preview (temporary, see #41)");
-    ui.add_space(8.0);
-    render_markdown(ui, markdown_cache, MARKDOWN_SAMPLE);
-
-    started.inner
+    })
+    .inner
 }
-
-/// Sample text for the temporary preview above. Exercises the three things M5
-/// needs: bold, italic and a list.
-// TODO(#41): remove together with the preview block in `start_screen`.
-const MARKDOWN_SAMPLE: &str = "\
-A card front can be **bold**, *italic*, or ***both***, and can carry a list:
-
-- *to run* - **correu** in the past
-- *to eat* - **comeu** in the past
-- `code spans` survive too
-";
 
 /// Draws the current card and applies the rating the user gives it.
 fn run_session(
     ui: &mut egui::Ui,
     connection: &Connection,
     session: &mut ReviewSession,
+    markdown_cache: &mut CommonMarkCache,
     status: &mut Option<String>,
 ) {
     // Keyboard state is read once, before anything is drawn, so both the
-    // buttons and the shortcuts feed the same two decisions below.
+    // buttons and the shortcuts feed the same two decisions below. Reading it
+    // here also puts it ahead of every widget in the frame, including the
+    // Markdown viewer: see `read_shortcuts` for why that ordering matters.
     let (reveal_shortcut, rating_shortcut) = read_shortcuts(ui.ctx(), session.revealed);
 
     let mut reveal = reveal_shortcut;
     let mut rating = rating_shortcut;
 
-    ui.vertical_centered(|ui| {
-        let Some(card) = session.current() else {
-            return;
-        };
+    if session.current().is_none() {
+        return;
+    }
 
+    // The controls are claimed *before* the card area is drawn. A bottom panel
+    // takes its height off the region first and hands what is left to whatever
+    // comes after, so the scroll area below can never grow into this space and
+    // push the buttons out of the window. Reversing these two blocks would undo
+    // the whole point of the scroll area.
+    egui::Panel::bottom("review_controls").show(ui, |ui| {
+        ui.add_space(8.0);
+        ui.vertical_centered(|ui| {
+            if session.revealed {
+                ui.horizontal(|ui| {
+                    for (index, (label, choice)) in RATINGS.iter().enumerate() {
+                        if ui.button(format!("{} ({})", label, index + 1)).clicked() {
+                            rating = Some(*choice);
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                ui.small("Press 1, 2, 3 or 4 to rate");
+            } else {
+                if ui.button("Show answer").clicked() {
+                    reveal = true;
+                }
+                ui.add_space(8.0);
+                ui.small("Press Space to reveal");
+            }
+        });
+        ui.add_space(8.0);
+    });
+
+    ui.vertical_centered(|ui| {
         ui.add_space(16.0);
         ui.small(format!("{} cards left", session.queue.len()));
         ui.add_space(16.0);
-
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_min_size(CARD_BOX_SIZE);
-            ui.vertical_centered(|ui| {
-                ui.add_space(16.0);
-                ui.heading(&card.front);
-
-                if session.revealed {
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.add_space(12.0);
-                    ui.label(&card.back);
-
-                    if let Some(example) = &card.example {
-                        ui.add_space(12.0);
-                        ui.small(example);
-                    }
-                }
-            });
-        });
-
-        ui.add_space(16.0);
-
-        if session.revealed {
-            ui.horizontal(|ui| {
-                for (index, (label, choice)) in RATINGS.iter().enumerate() {
-                    if ui.button(format!("{} ({})", label, index + 1)).clicked() {
-                        rating = Some(*choice);
-                    }
-                }
-            });
-            ui.add_space(8.0);
-            ui.small("Press 1, 2, 3 or 4 to rate");
-        } else {
-            if ui.button("Show answer").clicked() {
-                reveal = true;
-            }
-            ui.add_space(8.0);
-            ui.small("Press Space to reveal");
-        }
     });
+
+    // `auto_shrink([false, false])` keeps the viewport at the size the layout
+    // gave it instead of collapsing around short content, so the card box does
+    // not jump up and down as cards of different lengths go by. That is the
+    // same reason `CARD_BOX_SIZE` exists.
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            show_card(ui, session, markdown_cache);
+        });
 
     if reveal {
         session.revealed = true;
@@ -336,6 +310,73 @@ fn run_session(
     if let Some(rating) = rating {
         answer(connection, session, rating, status);
     }
+}
+
+/// Draws the card box: the front always, the back and example once revealed.
+///
+/// Every field goes through the Markdown renderer, because Markdown is the
+/// format they are stored in. Text with no markers renders as exactly that
+/// text, so a card written in plain prose looks the same as it did before.
+fn show_card(ui: &mut egui::Ui, session: &ReviewSession, markdown_cache: &mut CommonMarkCache) {
+    let Some(card) = session.current() else {
+        return;
+    };
+
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        // A `Frame` is sized by what it contains, so without this the box would
+        // be as wide as the longest line and the text would wrap early inside a
+        // narrow column. Claiming the available width first turns it into the
+        // full-width reading area a card wants; the height stays a floor, so
+        // short cards keep the box from collapsing.
+        ui.set_width(ui.available_width());
+        ui.set_min_height(CARD_BOX_SIZE.y);
+
+        // `vertical`, not `vertical_centered`: centring puts every widget on
+        // its own centred row, which is fine for a one-line label and wrong for
+        // a rendered document, where wrapped paragraphs and list bullets have
+        // to share a left edge.
+        ui.vertical(|ui| {
+            ui.add_space(16.0);
+            render_markdown_as(ui, markdown_cache, egui::TextStyle::Heading, &card.front);
+
+            if session.revealed {
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+                render_markdown(ui, markdown_cache, &card.back);
+
+                if let Some(example) = &card.example {
+                    ui.add_space(12.0);
+                    render_markdown_as(ui, markdown_cache, egui::TextStyle::Small, example);
+                }
+            }
+        });
+    });
+}
+
+/// Renders Markdown with the renderer's paragraph style swapped for `style`.
+///
+/// The renderer draws ordinary paragraphs in `TextStyle::Body`. Remapping that
+/// one entry inside a `ui.scope` is what lets the front keep the heading size it
+/// had as a plain label, and the example stay visually secondary, without a font
+/// size being hard-coded into `ui/markdown.rs`. Emphasis and code spans are
+/// derived from the same entry, so they scale along with it.
+///
+/// The scope restores the style when it ends, so nothing drawn afterwards is
+/// affected.
+fn render_markdown_as(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    style: egui::TextStyle,
+    text: &str,
+) {
+    ui.scope(|ui| {
+        let font = style.resolve(ui.style());
+        ui.style_mut()
+            .text_styles
+            .insert(egui::TextStyle::Body, font);
+        render_markdown(ui, cache, text);
+    });
 }
 
 /// Draws the end-of-session summary. Returns `true` when the user dismisses it.
@@ -365,6 +406,10 @@ fn summary_screen(ui: &mut egui::Ui, summary: &SessionSummary) -> bool {
 
 /// Minimum size of the box holding a card, so the layout does not jump between
 /// a short front and a long one.
+///
+/// The start and summary screens use both dimensions, since their content is a
+/// single centred line. The card box takes only the height: its width comes
+/// from the space available, so long text has somewhere to go.
 const CARD_BOX_SIZE: egui::Vec2 = egui::vec2(420.0, 180.0);
 
 /// Buttons offered after the answer is revealed, in keyboard-shortcut order.
@@ -441,6 +486,15 @@ fn relearns_label(relearns: u32) -> String {
 /// accepted while the answer is hidden and the digits only while it is shown,
 /// so a key held down across the transition cannot reveal a card and rate it in
 /// the same breath.
+///
+/// Rendering the card as Markdown does not interfere. egui delivers a key press
+/// to the widget that holds keyboard focus, and focus is only granted to a
+/// widget that asks for it: text fields, buttons reached with Tab, and so on.
+/// The Markdown viewer emits labels, which never request focus, so nothing on
+/// this screen claims the keyboard while a card is being read. What is read here
+/// is the frame's raw event list, which is filled before any widget runs, and
+/// this call is the first thing `run_session` does - so even a focused widget
+/// consuming an event later in the frame cannot take these keys away.
 fn read_shortcuts(ctx: &egui::Context, revealed: bool) -> (bool, Option<Rating>) {
     ctx.input(|input| {
         if !revealed {
