@@ -2,9 +2,9 @@
 //! Translates rows into `models` types so no SQL leaks into the rest of the
 //! application.
 
-use crate::models::Deck;
+use crate::models::{Card, Deck};
 use anyhow::{Context, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use directories::ProjectDirs;
 use rusqlite::{Connection, Row, params};
 use std::fs;
@@ -199,6 +199,143 @@ pub fn delete_deck(connection: &Connection, id: Uuid, now: DateTime<Utc>) -> Res
     Ok(())
 }
 
+/// Inserts a new card with the SM-2 defaults and returns it.
+///
+/// `now` and `today` are separate on purpose: one records when the row was
+/// written, the other decides the calendar day the card becomes due.
+pub fn create_card(
+    connection: &Connection,
+    deck_id: Uuid,
+    front: &str,
+    back: &str,
+    example: Option<&str>,
+    now: DateTime<Utc>,
+    today: NaiveDate,
+) -> Result<Card> {
+    let card = Card::new(
+        deck_id,
+        front.to_owned(),
+        back.to_owned(),
+        example.map(String::from),
+        now,
+        today,
+    );
+
+    connection
+        .execute(
+            "INSERT INTO cards (
+                 id, deck_id, front, back, example,
+                 interval_days, ease_factor, due_date,
+                 created_at, updated_at, deleted
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                card.id.to_string(),
+                card.deck_id.to_string(),
+                card.front,
+                card.back,
+                card.example,
+                card.interval_days,
+                card.ease_factor,
+                format_date(card.due_date),
+                format_timestamp(card.created_at),
+                format_timestamp(card.updated_at),
+                card.deleted,
+            ],
+        )
+        .with_context(|| format!("inserting card {}", card.id))?;
+
+    Ok(card)
+}
+
+/// Lists the cards of a deck that have not been deleted, oldest first.
+pub fn list_cards(connection: &Connection, deck_id: Uuid) -> Result<Vec<Card>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, deck_id, front, back, example,
+                    interval_days, ease_factor, due_date,
+                    created_at, updated_at, deleted
+             FROM cards
+             WHERE deck_id = ?1 AND deleted = 0
+             ORDER BY created_at",
+        )
+        .context("preparing the card list query")?;
+
+    let cards = statement
+        .query_map(params![deck_id.to_string()], row_to_card)
+        .context("running the card list query")?
+        .collect::<rusqlite::Result<Vec<Card>>>()
+        .context("reading cards")?;
+
+    Ok(cards)
+}
+
+/// Lists the cards of a deck that are due on or before `today`.
+///
+/// The comparison is a plain text comparison: ISO-8601 dates sort
+/// lexicographically in the same order they sort chronologically.
+pub fn due_cards(connection: &Connection, deck_id: Uuid, today: NaiveDate) -> Result<Vec<Card>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, deck_id, front, back, example,
+                    interval_days, ease_factor, due_date,
+                    created_at, updated_at, deleted
+             FROM cards
+             WHERE deck_id = ?1 AND deleted = 0 AND due_date <= ?2
+             ORDER BY due_date",
+        )
+        .context("preparing the due cards query")?;
+
+    let cards = statement
+        .query_map(
+            params![deck_id.to_string(), format_date(today)],
+            row_to_card,
+        )
+        .context("running the due cards query")?
+        .collect::<rusqlite::Result<Vec<Card>>>()
+        .context("reading due cards")?;
+
+    Ok(cards)
+}
+
+/// Edits the content of a card, leaving its scheduling untouched.
+///
+/// `interval_days`, `ease_factor` and `due_date` are deliberately absent: they
+/// belong to the SM-2 algorithm in `study/`, and fixing a typo on the back of a
+/// card must not reset how well it is known.
+///
+/// A missing id is not an error, as in [`delete_deck`].
+pub fn update_card(
+    connection: &Connection,
+    id: Uuid,
+    front: &str,
+    back: &str,
+    example: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    connection
+        .execute(
+            "UPDATE cards
+             SET front = ?2, back = ?3, example = ?4, updated_at = ?5
+             WHERE id = ?1",
+            params![id.to_string(), front, back, example, format_timestamp(now)],
+        )
+        .with_context(|| format!("updating card {id}"))?;
+
+    Ok(())
+}
+
+/// Soft-deletes a card, with the same semantics as [`delete_deck`].
+pub fn delete_card(connection: &Connection, id: Uuid, now: DateTime<Utc>) -> Result<()> {
+    connection
+        .execute(
+            "UPDATE cards SET deleted = 1, updated_at = ?2 WHERE id = ?1",
+            params![id.to_string(), format_timestamp(now)],
+        )
+        .with_context(|| format!("deleting card {id}"))?;
+
+    Ok(())
+}
+
 /// Builds a [`Deck`] from a row of the `decks` table.
 ///
 /// Every `SELECT` on decks goes through this function, so the column order and
@@ -215,6 +352,43 @@ fn row_to_deck(row: &Row<'_>) -> rusqlite::Result<Deck> {
         updated_at: parse_timestamp(&updated_at)?,
         deleted: row.get("deleted")?,
     })
+}
+
+/// Builds a [`Card`] from a row of the `cards` table.
+///
+/// Every `SELECT` on cards goes through this function, so the column order and
+/// the text formats are defined in exactly one place.
+fn row_to_card(row: &Row<'_>) -> rusqlite::Result<Card> {
+    let id: String = row.get("id")?;
+    let deck_id: String = row.get("deck_id")?;
+    let due_date: String = row.get("due_date")?;
+    let created_at: String = row.get("created_at")?;
+    let updated_at: String = row.get("updated_at")?;
+
+    Ok(Card {
+        id: parse_uuid(&id)?,
+        deck_id: parse_uuid(&deck_id)?,
+        front: row.get("front")?,
+        back: row.get("back")?,
+        example: row.get("example")?,
+        interval_days: row.get("interval_days")?,
+        ease_factor: row.get("ease_factor")?,
+        due_date: parse_date(&due_date)?,
+        created_at: parse_timestamp(&created_at)?,
+        updated_at: parse_timestamp(&updated_at)?,
+        deleted: row.get("deleted")?,
+    })
+}
+
+/// Formats a calendar date as `YYYY-MM-DD`, the only format the date columns
+/// hold, so that text order matches calendar order.
+fn format_date(value: NaiveDate) -> String {
+    value.format("%Y-%m-%d").to_string()
+}
+
+/// Parses a date written by [`format_date`].
+fn parse_date(value: &str) -> rusqlite::Result<NaiveDate> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(conversion_failure)
 }
 
 /// Formats a timestamp the way every timestamp column stores it.
@@ -259,6 +433,18 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 7, day, hour, 0, 0)
             .single()
             .expect("valid timestamp")
+    }
+
+    /// A fixed calendar day in the same month as [`at`].
+    fn on(day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 7, day).expect("valid date")
+    }
+
+    /// A database with one deck, for the card tests.
+    fn connection_with_deck() -> (Connection, Uuid) {
+        let connection = test_connection();
+        let deck = create_deck(&connection, "Deck", at(24, 10)).expect("creating a deck");
+        (connection, deck.id)
     }
 
     /// Opens an isolated in-memory database with the production schema.
@@ -417,5 +603,158 @@ mod tests {
         delete_deck(&connection, Uuid::new_v4(), at(25, 9)).expect("deleting a missing deck");
 
         assert_eq!(list_decks(&connection).expect("listing decks"), vec![kept]);
+    }
+
+    #[test]
+    fn create_card_applies_the_sm2_defaults() {
+        let (connection, deck_id) = connection_with_deck();
+
+        let card = create_card(
+            &connection,
+            deck_id,
+            "to gather",
+            "reunir",
+            None,
+            at(24, 11),
+            on(24),
+        )
+        .expect("creating a card");
+
+        assert_eq!(card.interval_days, 0);
+        assert_eq!(card.ease_factor, 2.5);
+        assert_eq!(card.due_date, on(24));
+
+        let stored = list_cards(&connection, deck_id).expect("listing cards");
+        assert_eq!(stored, vec![card]);
+    }
+
+    #[test]
+    fn due_cards_includes_today_and_the_past_but_not_the_future() {
+        let (connection, deck_id) = connection_with_deck();
+        let today = on(25);
+
+        let yesterday_card = create_card(&connection, deck_id, "y", "y", None, at(24, 9), on(24))
+            .expect("yesterday");
+        let today_card =
+            create_card(&connection, deck_id, "t", "t", None, at(24, 10), on(25)).expect("today");
+        create_card(&connection, deck_id, "m", "m", None, at(24, 11), on(26)).expect("tomorrow");
+
+        let due = due_cards(&connection, deck_id, today).expect("listing due cards");
+
+        assert_eq!(due, vec![yesterday_card, today_card]);
+    }
+
+    #[test]
+    fn update_card_edits_content_without_touching_scheduling() {
+        let (connection, deck_id) = connection_with_deck();
+
+        let card = create_card(
+            &connection,
+            deck_id,
+            "front",
+            "back",
+            Some("old example"),
+            at(24, 10),
+            on(24),
+        )
+        .expect("creating a card");
+
+        update_card(
+            &connection,
+            card.id,
+            "new front",
+            "new back",
+            Some("new example"),
+            at(26, 8),
+        )
+        .expect("updating a card");
+
+        let stored = list_cards(&connection, deck_id).expect("listing cards");
+        let stored = stored.first().expect("one card");
+
+        assert_eq!(stored.front, "new front");
+        assert_eq!(stored.back, "new back");
+        assert_eq!(stored.example.as_deref(), Some("new example"));
+        assert_eq!(stored.updated_at, at(26, 8));
+
+        // Scheduling belongs to `study/`: editing text must not reset it.
+        assert_eq!(stored.interval_days, card.interval_days);
+        assert_eq!(stored.ease_factor, card.ease_factor);
+        assert_eq!(stored.due_date, card.due_date);
+        assert_eq!(stored.created_at, card.created_at);
+    }
+
+    #[test]
+    fn deleted_cards_are_excluded_from_both_queries() {
+        let (connection, deck_id) = connection_with_deck();
+
+        let kept = create_card(
+            &connection,
+            deck_id,
+            "kept",
+            "kept",
+            None,
+            at(24, 10),
+            on(24),
+        )
+        .expect("creating the kept card");
+        let removed = create_card(
+            &connection,
+            deck_id,
+            "removed",
+            "removed",
+            None,
+            at(24, 11),
+            on(24),
+        )
+        .expect("creating the removed card");
+
+        delete_card(&connection, removed.id, at(25, 9)).expect("deleting a card");
+
+        assert_eq!(
+            list_cards(&connection, deck_id).expect("listing cards"),
+            vec![kept.clone()]
+        );
+        assert_eq!(
+            due_cards(&connection, deck_id, on(25)).expect("listing due cards"),
+            vec![kept]
+        );
+    }
+
+    #[test]
+    fn example_survives_a_round_trip_in_both_shapes() {
+        let (connection, deck_id) = connection_with_deck();
+
+        create_card(
+            &connection,
+            deck_id,
+            "with",
+            "with",
+            Some("She gathered the papers."),
+            at(24, 10),
+            on(24),
+        )
+        .expect("creating a card with an example");
+        create_card(
+            &connection,
+            deck_id,
+            "without",
+            "without",
+            None,
+            at(24, 11),
+            on(24),
+        )
+        .expect("creating a card without an example");
+
+        let examples: Vec<Option<String>> = list_cards(&connection, deck_id)
+            .expect("listing cards")
+            .into_iter()
+            .map(|card| card.example)
+            .collect();
+
+        assert_eq!(
+            examples,
+            vec![Some("She gathered the papers.".to_owned()), None]
+        );
     }
 }
