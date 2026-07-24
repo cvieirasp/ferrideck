@@ -60,6 +60,9 @@ pub(super) fn show(
             ui.label("No decks yet. Type a name above and press Add.");
         }
         Ok(decks) => {
+            // Deck names are plain text on purpose: Markdown is the format of
+            // card content, not of the app's own labels. Rendering a name would
+            // turn a deck called "C** basics" into something else.
             for deck in decks {
                 let is_selected = *selected_deck == Some(deck.id);
                 if ui.selectable_label(is_selected, &deck.name).clicked() {
