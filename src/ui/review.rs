@@ -2,7 +2,7 @@
 //! went. Owns the session queue while it lasts; the scheduling decisions come
 //! from `study/` and the writes go through `db/`.
 
-use super::markdown::{CommonMarkCache, render_markdown};
+use super::markdown::{CommonMarkCache, render_markdown, render_markdown_as};
 use crate::db;
 use crate::models::{Card, Scheduling};
 use crate::study::{self, Rating};
@@ -337,7 +337,7 @@ fn show_card(ui: &mut egui::Ui, session: &ReviewSession, markdown_cache: &mut Co
         // to share a left edge.
         ui.vertical(|ui| {
             ui.add_space(16.0);
-            render_markdown_as(ui, markdown_cache, egui::TextStyle::Heading, &card.front);
+            render_markdown_as(ui, markdown_cache, &egui::TextStyle::Heading, &card.front);
 
             if session.revealed {
                 ui.add_space(12.0);
@@ -347,35 +347,10 @@ fn show_card(ui: &mut egui::Ui, session: &ReviewSession, markdown_cache: &mut Co
 
                 if let Some(example) = &card.example {
                     ui.add_space(12.0);
-                    render_markdown_as(ui, markdown_cache, egui::TextStyle::Small, example);
+                    render_markdown_as(ui, markdown_cache, &egui::TextStyle::Small, example);
                 }
             }
         });
-    });
-}
-
-/// Renders Markdown with the renderer's paragraph style swapped for `style`.
-///
-/// The renderer draws ordinary paragraphs in `TextStyle::Body`. Remapping that
-/// one entry inside a `ui.scope` is what lets the front keep the heading size it
-/// had as a plain label, and the example stay visually secondary, without a font
-/// size being hard-coded into `ui/markdown.rs`. Emphasis and code spans are
-/// derived from the same entry, so they scale along with it.
-///
-/// The scope restores the style when it ends, so nothing drawn afterwards is
-/// affected.
-fn render_markdown_as(
-    ui: &mut egui::Ui,
-    cache: &mut CommonMarkCache,
-    style: egui::TextStyle,
-    text: &str,
-) {
-    ui.scope(|ui| {
-        let font = style.resolve(ui.style());
-        ui.style_mut()
-            .text_styles
-            .insert(egui::TextStyle::Body, font);
-        render_markdown(ui, cache, text);
     });
 }
 

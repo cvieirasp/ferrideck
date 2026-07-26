@@ -181,6 +181,7 @@ impl eframe::App for FerrideckApp {
                     connection,
                     state.selected_deck,
                     &mut state.card_draft,
+                    markdown_cache,
                     &mut state.status,
                 ),
                 Screen::DeckList => deck_list::show(
