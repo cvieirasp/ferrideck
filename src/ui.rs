@@ -7,6 +7,7 @@
 
 mod card_editor;
 mod deck_list;
+mod formatting;
 mod markdown;
 mod review;
 
